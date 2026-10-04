@@ -30,3 +30,54 @@ Pair-wise GSB 标注任务仓库（第 17 批 / 285）。
 1. 在本仓库中完成提示词要求的全部内容。
 2. `./mvnw -q verify` 必须通过。
 3. 完成后在所属分支（A 或 B）上提交，产物快照的父提交必须是初始环境快照。
+
+---
+
+## 实现说明（分支 B）
+
+### 组件结构
+
+| 类 | 职责 |
+|----|------|
+| `DataValidator` | 校验者接口：`id()` + `validate(data)` 返回 `Verdict`（结论 + 理由） |
+| `DistributedArbiter` | 仲裁引擎：登记校验者（含权重）、并发执行校验、超时缺席处理、多数决仲裁 |
+| `ArbitrationOutcome` | 一轮仲裁结果：`MAJORITY`（含采纳结论）或 `DIVERGENT`（含分歧上报） |
+| `ConclusionGroup` | 相同结论的分组：结论、权重之和、组内校验者及各自理由 |
+| `DivergenceReport` | 分歧上报：各组结论、涉及校验者、分歧点摘要、缺席名单 |
+| `ArbitrationStatistics` | 累计统计：轮次、多数决成功数、分歧数、各校验者可靠性画像 |
+| `ValidatorReliability` | 可靠性画像：参与轮次、缺席次数、与多数吻合率 |
+
+### 仲裁规则
+
+- **多数决**：按结论分组累加权重，某组权重**严格大于**到场校验者总权重的 1/2 时采纳该结论。
+- **偶数校验者**：采用严格多数（> 50%）而非 ≥ 50%，因此偶数人数等权平票（如 2:2）时无任何一组过半，判为分歧并输出 `DivergenceReport` 供人工介入；若权重不等使一方权重过半，仍可正常裁决。
+- **权重**：登记时可配置正数权重（缺省 1.0），权重之和参与多数决计票。
+- **超时与缺席**：所有校验并发执行，对每个结果只等待到统一截止时间；超时或执行抛异常的校验者取消任务并记入缺席名单，仲裁绝不无限等待。缺席者不参与计票。
+- **可靠性画像**：仅在已形成多数决且校验者到场的轮次统计吻合率（吻合次数 / 可评判轮次），分歧轮次不计入，供后续权重调整参考。
+
+### 使用示例
+
+```java
+try (DistributedArbiter arbiter = new DistributedArbiter()) {
+    arbiter.register(validatorA);          // 缺省权重 1
+    arbiter.register(validatorB, 3.0);     // 高可信校验者，权重 3
+    arbiter.register(validatorC);
+
+    ArbitrationOutcome outcome = arbiter.arbitrate("关键数据", Duration.ofMillis(500));
+    if (outcome.isMajority()) {
+        System.out.println("采纳结论: " + outcome.adoptedConclusion());
+    } else {
+        System.out.println(outcome.divergenceReport().summary()); // 人工介入
+    }
+
+    ArbitrationStatistics stats = arbiter.statistics();
+    stats.reliabilityProfiles().forEach(r ->
+        System.out.printf("%s 吻合率=%.2f 缺席=%d%n", r.validatorId(), r.agreementRate(), r.absences()));
+}
+```
+
+### 验证
+
+```bash
+./mvnw -q verify   # 19 个测试覆盖多数决、偶数平票、权重、超时缺席、分歧上报、可靠性画像与统计
+```
